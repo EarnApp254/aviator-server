@@ -5,44 +5,11 @@ const db = require("./firebase-admin");
 const app = express();
 
 app.use(cors());
+app.use(express.json());
 
-// ==========================
-// FIREBASE TEST
-// ==========================
-
-(async () => {
-    try {
-
-        await db
-            .collection("test")
-            .doc("connection")
-            .set({
-                time: Date.now()
-            });
-
-        console.log("Firebase Connected");
-
-    } catch (err) {
-
-        console.error("Firebase Error:", err);
-
-    }
-})();
-
-// ==========================
-// GAME STATE
-// ==========================
-
-let currentRound = {
-    roundId: Date.now(),
-    startTime: Date.now()
-};
-
-let currentCrashPoint = generateCrashPoint();
-
-// ==========================
+// ==================================
 // CRASH GENERATOR
-// ==========================
+// ==================================
 
 function generateCrashPoint() {
 
@@ -53,133 +20,266 @@ function generateCrashPoint() {
     }
 
     if (r < 0.90) {
-        return +(4 + Math.random() * 5.99).toFixed(2);
+        return +(4 + Math.random() * 6).toFixed(2);
     }
 
     if (r < 0.98) {
         return +(10 + Math.random() * 40).toFixed(2);
     }
 
-    return +(51 + Math.random() * 49).toFixed(2);
+    return +(50 + Math.random() * 100).toFixed(2);
 }
 
-// ==========================
-// SAVE RESULT TO FIREBASE
-// ==========================
+// ==================================
+// INITIALIZE GAME
+// ==================================
 
-async function saveRoundToFirebase(result) {
+async function initializeGame() {
+
+    const gameRef =
+        db.collection("game")
+          .doc("state");
+
+    const snap =
+        await gameRef.get();
+
+    if (snap.exists) {
+
+        console.log(
+            "Game already initialized"
+        );
+
+        return;
+    }
+
+    const currentCrash =
+        generateCrashPoint();
+
+    const nextCrash =
+        generateCrashPoint();
+
+    await gameRef.set({
+
+        currentRound: {
+            roundId: Date.now(),
+            crashPoint: currentCrash
+        },
+
+        nextRound: {
+            roundId: Date.now() + 1,
+            crashPoint: nextCrash
+        }
+
+    });
+
+    console.log(
+        "Game initialized"
+    );
+
+}
+
+// ==================================
+// SAVE HISTORY
+// ==================================
+
+async function saveRound(result) {
 
     try {
 
-        const historyRef =
+        const ref =
             db.collection("roundHistory")
               .doc("latest");
 
-        const snap = await historyRef.get();
+        const snap =
+            await ref.get();
 
         let history = [];
 
         if (snap.exists) {
-            history = snap.data().history || [];
+
+            history =
+                snap.data().history || [];
+
         }
 
         history.unshift({
-            result: result.toFixed(2),
-            time: Date.now()
+
+            result:
+                Number(result).toFixed(2),
+
+            time:
+                Date.now()
+
         });
 
-        history = history.slice(0, 24);
+        history =
+            history.slice(0,24);
 
-        await historyRef.set({
+        await ref.set({
             history
         });
 
-        console.log("Saved Result:", result);
+    } catch(err) {
 
-    } catch (err) {
-
-        console.error("Save Error:", err);
+        console.error(err);
 
     }
+
 }
 
-// ==========================
-// ROUND LOOP
-// ==========================
+// ==================================
+// PROMOTE NEXT ROUND
+// ==================================
 
-function startNewRound() {
+async function crashCurrentRound() {
 
-    currentRound = {
-        roundId: Date.now(),
-        startTime: Date.now()
-    };
+    try {
 
-    currentCrashPoint = generateCrashPoint();
+        const gameRef =
+            db.collection("game")
+              .doc("state");
 
-    console.log(
-        "New Round:",
-        currentRound.roundId
-    );
+        const snap =
+            await gameRef.get();
 
-    console.log(
-        "Secret Crash:",
-        currentCrashPoint
-    );
+        if (!snap.exists) return;
 
-    // Save AFTER round ends
-    const roundCrashPoint = currentCrashPoint;
+        const data =
+            snap.data();
 
-setTimeout(async () => {
+        const finishedRound =
+            data.currentRound;
 
-    await saveRoundToFirebase(roundCrashPoint);
+        await saveRound(
+            finishedRound.crashPoint
+        );
 
-    console.log(
-        "Round Ended:",
-        roundCrashPoint
-    );
+        const newNext = {
 
-}, 15000);
+            roundId:
+                Date.now() + 999,
+
+            crashPoint:
+                generateCrashPoint()
+
+        };
+
+        await gameRef.update({
+
+            currentRound:
+                data.nextRound,
+
+            nextRound:
+                newNext
+
+        });
+
+        console.log(
+            "Promoted round"
+        );
+
+    } catch(err) {
+
+        console.error(err);
+
+    }
+
 }
 
-startNewRound();
-
-// New round every 15 sec
-setInterval(() => {
-
-    startNewRound();
-
-}, 15000);
-
-// ==========================
+// ==================================
 // ROUTES
-// ==========================
+// ==================================
 
-app.get("/", (req, res) => {
+app.get("/", (req,res)=>{
 
-    res.send("AVIATOR SERVER ONLINE");
-
-});
-
-// Frontend only gets round ID and start time
-app.get("/current-round", (req, res) => {
-
-    res.json({
-        roundId: currentRound.roundId,
-        startTime: currentRound.startTime
-    });
-
-});
-
-// ==========================
-// START SERVER
-// ==========================
-
-const PORT = process.env.PORT || 5000;
-
-app.listen(PORT, () => {
-
-    console.log(
-        `Server running on port ${PORT}`
+    res.send(
+        "AVIATOR SERVER ONLINE"
     );
+
+});
+
+// Client reads current round
+
+app.get("/current-round",
+
+async (req,res)=>{
+
+    try {
+
+        const snap =
+            await db
+            .collection("game")
+            .doc("state")
+            .get();
+
+        if (!snap.exists) {
+
+            return res
+            .status(404)
+            .json({
+                error:"No game"
+            });
+
+        }
+
+        res.json(
+            snap.data().currentRound
+        );
+
+    } catch(err) {
+
+        res.status(500)
+        .json({
+            error:err.message
+        });
+
+    }
+
+});
+
+// Client calls after crash
+
+app.post("/round-crashed",
+
+async (req,res)=>{
+
+    try {
+
+        await crashCurrentRound();
+
+        res.json({
+            success:true
+        });
+
+    } catch(err) {
+
+        res.status(500)
+        .json({
+            success:false,
+            error:err.message
+        });
+
+    }
+
+});
+
+// ==================================
+// START
+// ==================================
+
+const PORT =
+    process.env.PORT || 5000;
+
+initializeGame()
+.then(()=>{
+
+    app.listen(PORT,()=>{
+
+        console.log(
+            "Server running on",
+            PORT
+        );
+
+    });
 
 });
